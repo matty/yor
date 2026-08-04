@@ -229,19 +229,22 @@ func (p *CloudformationParser) WriteFile(readFilePath string, blocks []structure
 		block := block.(*CloudformationBlock)
 		block.UpdateTags()
 	}
-	tempFile, err := os.CreateTemp(filepath.Dir(readFilePath), "temp.*.template")
-	defer func() {
-		_ = os.Remove(tempFile.Name())
-	}()
+	tempFilePath, err := utils.CreateClosedTempFile(filepath.Dir(readFilePath), "temp.*.template")
 	if err != nil {
 		return err
 	}
-	err = p.writeToFile(readFilePath, blocks, tempFile.Name())
+	defer func() {
+		if removeErr := os.Remove(tempFilePath); removeErr != nil {
+			logger.Warning(fmt.Sprintf("failed to remove temp file %s: %s", tempFilePath, removeErr))
+		}
+	}()
+
+	err = p.writeToFile(readFilePath, blocks, tempFilePath)
 	if err != nil {
 		return err
 	}
 
-	_, err = p.ParseFile(tempFile.Name())
+	_, err = p.ParseFile(tempFilePath)
 	if err != nil {
 		return fmt.Errorf("editing file %v resulted in a malformed template, please open a github issue with the relevant details", readFilePath)
 	}

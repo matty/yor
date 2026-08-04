@@ -72,6 +72,29 @@ func GetFileScanner(filePath string, nonFoundLines *structure.Lines) (*bufio.Sca
 	return scanner, nonFoundLines
 }
 
+// CreateClosedTempFile creates an empty temp file in dir and returns its path with no
+// handle left open.
+//
+// Before touching a real file, yor writes the candidate result to a temp file and
+// re-parses it to confirm it is still valid. The handle os.CreateTemp hands back is
+// never used for that - the file is written through its path - and on Windows an open
+// handle makes the later os.Remove fail, which left temp.* files behind in the very
+// directory being tagged. Those leftovers are themselves valid templates, so
+// subsequent runs picked them up and tagged them too.
+func CreateClosedTempFile(dir string, pattern string) (string, error) {
+	tempFile, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	tempFilePath := tempFile.Name()
+	if err = tempFile.Close(); err != nil {
+		_ = os.Remove(tempFilePath)
+		return "", err
+	}
+
+	return tempFilePath, nil
+}
+
 func GetFileFormat(filePath string) string {
 	splitByDot := strings.Split(filePath, ".")
 	if len(splitByDot) < 2 {
