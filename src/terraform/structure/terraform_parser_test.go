@@ -189,7 +189,13 @@ func TestTerraformParser(t *testing.T) {
 		actualFiles, err := terraformParser.GetSourceFiles(directory)
 		assert.Equal(t, len(expectedFiles), len(actualFiles))
 		for _, file := range actualFiles {
-			splitFile := strings.Split(file, "/")
+			// filepath.Walk returns OS-native separators, so normalise before splitting -
+			// on Windows every path came back as one element and the slice below panicked.
+			splitFile := strings.Split(filepath.ToSlash(file), "/")
+			if len(splitFile) < 2 {
+				t.Errorf("unexpected file path %s", file)
+				continue
+			}
 			lastTwoParts := splitFile[len(splitFile)-2:]
 			assert.True(t, utils.InSlice(expectedFiles, strings.Join(lastTwoParts, "/")), fmt.Sprintf("expected file %s to be in directory\n", file))
 		}

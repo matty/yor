@@ -106,17 +106,27 @@ func (p *ServerlessParser) ParseFile(filePath string) ([]structure.IBlock, error
 	default:
 		return nil, fmt.Errorf("unsupported file type %s", utils.GetFileFormat(filePath))
 	}
-	minResourceLine := math.MaxInt8
+	// math.MaxInt8 is 127, so any file whose functions all start after line 127 used to
+	// report 127 as the start of the functions block.
+	minResourceLine := math.MaxInt
 	maxResourceLine := 0
 	for _, funcName := range resourceNames {
 		var existingTags []tags.ITag
 		var slsBlock *ServerlessBlock
 		tagsLines := structure.Lines{Start: -1, End: -1}
-		var lines *structure.Lines
 		slsFunction := template.Functions[funcName]
-		lines = resourceNamesToLines[funcName]
-		minResourceLine = int(math.Min(float64(minResourceLine), float64(lines.Start)))
-		maxResourceLine = int(math.Max(float64(maxResourceLine), float64(lines.End)))
+		lines, ok := resourceNamesToLines[funcName]
+		if !ok || lines == nil {
+			// MapResourcesLineYAML returns a nil map when the file cannot be read.
+			logger.Warning(fmt.Sprintf("could not map function %s in file %s to lines, skipping it", funcName, filePath))
+			continue
+		}
+		if lines.Start < minResourceLine {
+			minResourceLine = lines.Start
+		}
+		if lines.End > maxResourceLine {
+			maxResourceLine = lines.End
+		}
 		if slsFunction.Tags != nil {
 			tagsLines = p.getTagsLines(filePath, lines)
 			for tagKey, tagValue := range slsFunction.Tags {
@@ -181,7 +191,11 @@ func (p *ServerlessParser) getTagsLines(filePath string, resourceLinesRange *str
 	lineCounter := 0
 	switch fileFormat {
 	case common.YamlFileType.FileFormat, common.YmlFileType.FileFormat:
-		scanner, _ := utils.GetFileScanner(filePath, &nonFoundLines)
+		scanner, closeFile, _ := utils.GetFileScanner(filePath, &nonFoundLines)
+		if scanner == nil {
+			return nonFoundLines
+		}
+		defer closeFile()
 		// iterate file line by line
 		tagsIndentSize := 0
 		for scanner.Scan() {

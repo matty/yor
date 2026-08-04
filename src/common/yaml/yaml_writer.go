@@ -24,10 +24,31 @@ func WriteYAMLFile(readFilePath string, blocks []structure.IBlock, writeFilePath
 	if err != nil {
 		return fmt.Errorf("failed to read file %s because %s", readFilePath, err)
 	}
-	isCfn := blocks[0].(IYamlBlock).GetFramework() == "Cloudformation"
+	if len(blocks) == 0 {
+		return fmt.Errorf("got no blocks to write to file %s", readFilePath)
+	}
+	yamlBlock, ok := blocks[0].(IYamlBlock)
+	if !ok {
+		return fmt.Errorf("block of type %T in file %s is not a yaml block", blocks[0], readFilePath)
+	}
+	isCfn := yamlBlock.GetFramework() == "Cloudformation"
 	originLines := utils.GetLinesFromBytes(originFileSrc)
 
+	// This function rebuilds the whole resources region from the per-block line ranges,
+	// so a range that does not resolve cannot simply be skipped - the lines it covers
+	// would be dropped from the output. Resources whose lines could not be mapped carry
+	// {-1,-1}, which used to slice out of range. Bail out before writing anything and
+	// leave the file untouched instead.
+	if err = validateBlockLines(blocks, originLines, readFilePath); err != nil {
+		return err
+	}
+
 	oldResourcesLineRange := computeResourcesLineRange(originLines, blocks, isCfn)
+	if oldResourcesLineRange.Start < 0 || oldResourcesLineRange.End < oldResourcesLineRange.Start ||
+		oldResourcesLineRange.End >= len(originLines) {
+		return fmt.Errorf("could not resolve the %s block of file %s (lines %d-%d), leaving it untouched",
+			resourcesStartToken, readFilePath, oldResourcesLineRange.Start, oldResourcesLineRange.End)
+	}
 	resourcesLines := make([]string, 0)
 	sort.Slice(blocks, func(i, j int) bool {
 		return blocks[i].GetLines().Start < blocks[j].GetLines().Start
@@ -93,7 +114,7 @@ func WriteYAMLFile(readFilePath string, blocks []structure.IBlock, writeFilePath
 		}
 		allNewResourceTagLines := IndentLines(newResourceLines[newResourceTagLineRange.Start+1:newResourceTagLineRange.End+1], oldTagsIndent, oldTagsValueIndent)
 		var netNewResourceLines []string
-		for i := 0; i < len(allNewResourceTagLines); i += linesPerTag {
+		for i := 0; i+linesPerTag <= len(allNewResourceTagLines); i += linesPerTag {
 			l := allNewResourceTagLines[i]
 			key := getKeyFromLine(l, isCfn)
 			if key == "" {
@@ -127,6 +148,42 @@ func WriteYAMLFile(readFilePath string, blocks []structure.IBlock, writeFilePath
 	err = os.WriteFile(writeFilePath, []byte(linesText), 0600)
 
 	return err
+}
+
+// validateBlockLines reports an error if any block's recorded line range does not sit
+// inside originLines, or is too short to insert a tags attribute into.
+func validateBlockLines(blocks []structure.IBlock, originLines []string, filePath string) error {
+	for _, block := range blocks {
+		lines := block.GetLines()
+		if lines.Start < 0 || lines.End < lines.Start || lines.End >= len(originLines) {
+			return fmt.Errorf("could not locate resource %s in file %s (lines %d-%d), leaving the file untouched",
+				block.GetResourceID(), filePath, lines.Start, lines.End)
+		}
+		if !block.IsBlockTaggable() {
+			continue
+		}
+		// A taggable resource needs at least a name line and one property line: the
+		// indentation for the tags attribute is taken from the second line.
+		if lines.End-lines.Start < 1 {
+			return fmt.Errorf("resource %s in file %s spans a single line (%d), which leaves nowhere to add tags; leaving the file untouched",
+				block.GetResourceID(), filePath, lines.Start)
+		}
+		tagLines := block.GetTagsLines()
+		if tagLines.Start == -1 || tagLines.End == -1 {
+			continue
+		}
+		if tagLines.Start < lines.Start || tagLines.End > lines.End || tagLines.End < tagLines.Start {
+			return fmt.Errorf("tags of resource %s in file %s are recorded at lines %d-%d, outside the resource (%d-%d); leaving the file untouched",
+				block.GetResourceID(), filePath, tagLines.Start, tagLines.End, lines.Start, lines.End)
+		}
+		// The line after the tags attribute is read to work out the value indentation.
+		if tagLines.Start+1 > lines.End {
+			return fmt.Errorf("tags of resource %s in file %s end the resource at line %d, leaving no value to indent against; leaving the file untouched",
+				block.GetResourceID(), filePath, tagLines.Start)
+		}
+	}
+
+	return nil
 }
 
 func getKeyFromLine(l string, isCfn bool) string {
@@ -274,7 +331,9 @@ func MapResourcesLineYAML(filePath string, resourceNames []string, resourcesStar
 	for i, line := range fileLines {
 		cleanContent := strings.TrimSpace(line)
 		if strings.HasPrefix(cleanContent, resourcesStartToken+":") {
-			if strings.ToUpper(strings.TrimSpace(fileLines[i-1])) == "#YOR:SKIPALL" {
+			// There is no line above when the token is the first line of the file, which
+			// is ordinary in a serverless.yml that opens with "functions:".
+			if i > 0 && strings.ToUpper(strings.TrimSpace(fileLines[i-1])) == "#YOR:SKIPALL" {
 				skipResourcesByComment = append(skipResourcesByComment, resourceNames...)
 			}
 			readResources = true
