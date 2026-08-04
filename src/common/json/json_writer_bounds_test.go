@@ -153,3 +153,57 @@ func TestTrimIndentBy(t *testing.T) {
 	assert.Equal(t, "", trimIndentBy("  ", 9))
 	assert.Equal(t, "", trimIndentBy("", 1))
 }
+
+// Key and Value can appear in either order inside a tag object. Carrying a pending
+// Value line across objects used to write an updated tag's value onto the preceding
+// tag's Value line and leave its own value stale.
+func TestUpdateExistingTagsPerObject(t *testing.T) {
+	t.Run("second tag updated, first left alone", func(t *testing.T) {
+		lines := []string{
+			"[",
+			"  {",
+			`    "Key": "yor_trace",`,
+			`    "Value": "keep-me"`,
+			"  },",
+			"  {",
+			`    "Key": "yor_name",`,
+			`    "Value": "stale"`,
+			"  }",
+			"]",
+		}
+		UpdateExistingTags(lines, []*tags.TagDiff{{Key: "yor_name", PrevValue: "stale", NewValue: "correct"}})
+		assert.Equal(t, `    "Value": "keep-me"`, lines[3])
+		assert.Equal(t, `    "Value": "correct"`, lines[7])
+	})
+
+	t.Run("value before key still works", func(t *testing.T) {
+		lines := []string{
+			"[",
+			"  {",
+			`    "Value":"Reverse",`,
+			`    "Key": "RK"`,
+			"  }",
+			"]",
+		}
+		UpdateExistingTags(lines, []*tags.TagDiff{{Key: "RK", PrevValue: "Reverse", NewValue: "ReverseCorrect"}})
+		assert.Equal(t, `    "Value": "ReverseCorrect",`, lines[2])
+	})
+
+	t.Run("a key that is a substring of another is not confused", func(t *testing.T) {
+		lines := []string{
+			"[",
+			"  {",
+			`    "Key": "yor_trace_extra",`,
+			`    "Value": "keep-me"`,
+			"  },",
+			"  {",
+			`    "Key": "yor_trace",`,
+			`    "Value": "stale"`,
+			"  }",
+			"]",
+		}
+		UpdateExistingTags(lines, []*tags.TagDiff{{Key: "yor_trace", PrevValue: "stale", NewValue: "correct"}})
+		assert.Equal(t, `    "Value": "keep-me"`, lines[3])
+		assert.Equal(t, `    "Value": "correct"`, lines[7])
+	})
+}

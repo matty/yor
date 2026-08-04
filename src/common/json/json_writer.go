@@ -311,33 +311,61 @@ func lineIndentAt(str string, index int) string {
 	return indent
 }
 
+// UpdateExistingTags rewrites the value of every tag in tagsLinesList that appears in
+// diff, in place.
+//
+// "Key" and "Value" may appear in either order within a tag object, so each object is
+// resolved as a unit. The previous implementation carried a pending Value line across
+// object boundaries and only cleared it when a Key matched, so for the usual
+// Key-then-Value layout an updated tag wrote its new value onto the *preceding* tag's
+// Value line and left its own value stale.
 func UpdateExistingTags(tagsLinesList []string, diff []*tags.TagDiff) {
-	currentValueLine := -1
-	valueToSet := ""
+	newValueByKey := make(map[string]string, len(diff))
+	for _, tagDiff := range diff {
+		newValueByKey[tagDiff.Key] = tagDiff.NewValue
+	}
+
+	keyLine, valueLine := -1, -1
+	tagKey := ""
+	applyPendingTag := func() {
+		if keyLine >= 0 && valueLine >= 0 {
+			if newValue, ok := newValueByKey[tagKey]; ok {
+				tagsLinesList[valueLine] = ReplaceTagValue(tagsLinesList[valueLine], newValue)
+			}
+		}
+		keyLine, valueLine, tagKey = -1, -1, ""
+	}
 
 	for i, tagLine := range tagsLinesList {
+		if strings.Contains(tagLine, "{") {
+			// A new tag object starts here, so anything pending belongs to the previous one.
+			applyPendingTag()
+		}
 		if strings.Contains(tagLine, `"Key"`) {
-			for _, tag := range diff {
-				if strings.Contains(tagLine, fmt.Sprintf(`"%v"`, tag.Key)) {
-					if currentValueLine > -1 {
-						tagsLinesList[currentValueLine] = ReplaceTagValue(tagsLinesList[currentValueLine], tag.NewValue)
-						currentValueLine = -1
-					} else {
-						valueToSet = tag.NewValue
-					}
-					continue
-				}
-			}
+			keyLine = i
+			tagKey = extractJSONKeyName(tagLine)
 		}
 		if strings.Contains(tagLine, `"Value"`) {
-			if valueToSet != "" {
-				tagsLinesList[i] = ReplaceTagValue(tagLine, valueToSet)
-				valueToSet = ""
-			} else {
-				currentValueLine = i
-			}
+			valueLine = i
+		}
+		if strings.Contains(tagLine, "}") {
+			applyPendingTag()
 		}
 	}
+	applyPendingTag()
+}
+
+var jsonTagKeyRegex = regexp.MustCompile(`"Key"\s*:\s*"([^"]*)"`)
+
+// extractJSONKeyName pulls the tag name out of a `"Key": "<name>"` line. Matching the
+// name exactly avoids updating a tag whose key merely contains another key as a substring.
+func extractJSONKeyName(tagLine string) string {
+	match := jsonTagKeyRegex.FindStringSubmatch(tagLine)
+	if match == nil {
+		return ""
+	}
+
+	return match[1]
 }
 
 func ReplaceTagValue(tagLine string, valueToSet string) string {
