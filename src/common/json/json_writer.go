@@ -87,11 +87,25 @@ func AddTagsToResourceStr(fullOriginStr string, resourceBlock structure.IBlock, 
 
 		//	now find the indentation of the first tags entry by searching an indent between "[" and first "{". If there is a newline, restart the indent.
 		tagBlockIndent := findIndent(tagsStr, '{', 0) // find the indent of each tag block " { "
-		firstTagIndex := strings.Index(tagsStr[1:], "{") + 2
-		firstTagStr := tagsStr[firstTagIndex : firstTagIndex+strings.Index(tagsStr[firstTagIndex+1:], "\"")]
-		tagEntryIndent := findIndent(tagsStr, '"', strings.Index(tagsStr[1:], "{")) // find the indent of the key and value entry
+		// Index of the "{" opening the first tag object. -1 means the array holds no
+		// tag objects at all (an empty `"Tags": []`), which is handled separately below.
+		firstTagBraceIndex := strings.Index(tagsStr, "{")
+		// The gap between that "{" and the first key tells us whether the key sits on
+		// its own line.
+		firstTagStr := ""
+		if firstTagBraceIndex >= 0 {
+			if quoteOffset := strings.Index(tagsStr[firstTagBraceIndex+1:], `"`); quoteOffset >= 0 {
+				firstTagStr = tagsStr[firstTagBraceIndex+1 : firstTagBraceIndex+1+quoteOffset]
+			}
+		}
+		tagEntryIndent := findIndent(tagsStr, '"', firstTagBraceIndex) // find the indent of the key and value entry
 		compact := false
 		switch {
+		case firstTagBraceIndex < 0:
+			// The tags attribute exists but is an empty array, so there is nothing to
+			// preserve and no existing entry to take the indentation from. Rewrite the
+			// whole array from the added tags, indented like the line the array opens on.
+			return replaceEmptyTagsArray(fullOriginStr, resourceStr, diff.Added, resourceBrackets, tagBrackets)
 		case strings.Contains(firstTagStr, "\n"):
 			// If the tag string has a newline, it means the indent needs to be re-evaluated. Example for this use case:
 			// "Tags": [
@@ -101,8 +115,8 @@ func AddTagsToResourceStr(fullOriginStr string, resourceBlock structure.IBlock, 
 			//   }
 			// ]
 			indentDiff := len(tagEntryIndent) - len(tagBlockIndent)
-			tagBlockIndent = tagBlockIndent[0 : len(tagBlockIndent)-indentDiff]
-			tagEntryIndent = tagEntryIndent[0 : len(tagEntryIndent)-indentDiff]
+			tagBlockIndent = trimIndentBy(tagBlockIndent, indentDiff)
+			tagEntryIndent = trimIndentBy(tagEntryIndent, indentDiff)
 		case len(tagsLinesList) == 1:
 			// multi tags in one line
 			compact = true
@@ -111,35 +125,55 @@ func AddTagsToResourceStr(fullOriginStr string, resourceBlock structure.IBlock, 
 			// "Tags": [
 			//   { "Key": "some-key", "Value": "some-val" }
 			// ]
-			tagBlockIndent = tagBlockIndent[0 : len(tagBlockIndent)-1]
+			tagBlockIndent = trimIndentBy(tagBlockIndent, 1)
 
-		}
-
-		// unmarshal updated tags with the indent matching origin file. This will create the tags with the `[]` wrapping which will be discarded later
-		strAddedTags, err := json.MarshalIndent(diff.Added, tagBlockIndent, strings.TrimPrefix(tagEntryIndent, tagBlockIndent))
-		if err != nil {
-			logger.Warning(fmt.Sprintf("failed to unmarshal tags %s with indent '%s' because of error: %s", diff.Added, tagBlockIndent, err))
 		}
 
 		finalTagsStr := ""
-		if compact {
-			dst := &bytes.Buffer{}
-			if err := json.Compact(dst, strAddedTags); err != nil {
-				logger.Warning(fmt.Sprintf("failed to build tags %s with err: %s", strAddedTags, err))
-				return fullOriginStr
+		switch {
+		case len(diff.Added) == 0:
+			// Nothing to append: every tag key is already present and only values
+			// changed, which UpdateExistingTags has already rewritten in tagsLinesList.
+			// json.MarshalIndent of an empty set yields the single line "null"/"[]", so
+			// the append paths below have no tag lines to splice in.
+			finalTagsStr = strings.Join(tagsLinesList, "\n")
+		default:
+			// unmarshal updated tags with the indent matching origin file. This will create the tags with the `[]` wrapping which will be discarded later
+			strAddedTags, err := json.MarshalIndent(diff.Added, tagBlockIndent, strings.TrimPrefix(tagEntryIndent, tagBlockIndent))
+			if err != nil {
+				logger.Warning(fmt.Sprintf("failed to unmarshal tags %s with indent '%s' because of error: %s", diff.Added, tagBlockIndent, err))
+				return resourceStr
 			}
-			tagsLine := tagsLinesList[0]
 
-			finalTagsStr = tagsLine[:len(tagsLine)-1] + "," + dst.String()[1:]
-		} else {
-			netNewTagLines := strings.Split(string(strAddedTags), "\n")
-			finalTagsStr = strings.Join(tagsLinesList[:len(tagsLinesList)-1], "\n") + ",\n" +
-				strings.Join(netNewTagLines[1:len(netNewTagLines)-1], "\n") + "\n" +
-				tagsLinesList[len(tagsLinesList)-1]
+			if compact {
+				dst := &bytes.Buffer{}
+				if err := json.Compact(dst, strAddedTags); err != nil {
+					logger.Warning(fmt.Sprintf("failed to build tags %s with err: %s", strAddedTags, err))
+					return resourceStr
+				}
+				tagsLine := tagsLinesList[0]
 
+				finalTagsStr = tagsLine[:len(tagsLine)-1] + "," + dst.String()[1:]
+			} else {
+				netNewTagLines := strings.Split(string(strAddedTags), "\n")
+				if len(netNewTagLines) < 3 {
+					logger.Warning(fmt.Sprintf("unexpected marshalled tags layout for resource %s, leaving it untouched", resourceBlock.GetResourceID()))
+					return resourceStr
+				}
+				finalTagsStr = strings.Join(tagsLinesList[:len(tagsLinesList)-1], "\n") + ",\n" +
+					strings.Join(netNewTagLines[1:len(netNewTagLines)-1], "\n") + "\n" +
+					tagsLinesList[len(tagsLinesList)-1]
+			}
 		}
 		tagsStartRelativeToResource := tagBrackets.Open.CharIndex - resourceBrackets.Open.CharIndex
 		tagsEndRelativeToResource := tagBrackets.Close.CharIndex - resourceBrackets.Open.CharIndex
+		if tagsStartRelativeToResource < 0 || tagsEndRelativeToResource < tagsStartRelativeToResource ||
+			tagsEndRelativeToResource+1 > len(resourceStr) {
+			// The tags scope was not resolved inside this resource, so splicing by these
+			// offsets would either panic or graft the tags into the wrong place.
+			logger.Warning(fmt.Sprintf("could not locate the tags scope inside resource %s, leaving it untouched", resourceBlock.GetResourceID()))
+			return resourceStr
+		}
 
 		// set the resource string with the updated and indented tags
 		resourceStr = resourceStr[:tagsStartRelativeToResource] + finalTagsStr + resourceStr[tagsEndRelativeToResource+1:]
@@ -159,6 +193,13 @@ func AddTagsToResourceStr(fullOriginStr string, resourceBlock structure.IBlock, 
 				break
 			}
 			indexOfParent = findJSONKeyIndex(resourceStr, parentIdentifier)
+		}
+
+		if len(identifiersToAdd) == 0 {
+			// Only possible when the tags attribute name is the resource id itself, in
+			// which case there is no parent chain to build.
+			logger.Warning(fmt.Sprintf("could not resolve where to add tags for resource %s, leaving it untouched", resourceBlock.GetResourceID()))
+			return resourceStr
 		}
 
 		// step 3 - find indent from last parent scope start to it's first child
@@ -191,8 +232,13 @@ func AddTagsToResourceStr(fullOriginStr string, resourceBlock structure.IBlock, 
 		jsonToAdd, err := json.MarshalIndent(entriesToAdd, indent, indentStr)
 		if err != nil {
 			logger.Warning(fmt.Sprintf("failed to unmarshal tags %s with indent '%s' because of error: %s", entriesToAdd, indent, err))
+			return resourceStr
 		}
 		textToAdd := string(jsonToAdd)
+		if len(textToAdd) < 2 {
+			logger.Warning(fmt.Sprintf("unexpected marshalled tags layout for resource %s, leaving it untouched", resourceBlock.GetResourceID()))
+			return resourceStr
+		}
 
 		// remove first and last chars, which are '{' and '}' - we already have the top level map and don't need it
 		textToAdd = textToAdd[1 : len(textToAdd)-1]
@@ -223,6 +269,46 @@ func AddTagsToResourceStr(fullOriginStr string, resourceBlock structure.IBlock, 
 	}
 
 	return resourceStr
+}
+
+// replaceEmptyTagsArray rewrites an empty `"Tags": []` array with the tags that need
+// to be added. There is no existing entry to copy the layout from, so the array is
+// re-marshalled using the indentation of the line the array opens on.
+func replaceEmptyTagsArray(fullOriginStr string, resourceStr string, added []tags.ITag, resourceBrackets BracketPair, tagBrackets BracketPair) string {
+	if len(added) == 0 {
+		return resourceStr
+	}
+	start := tagBrackets.Open.CharIndex - resourceBrackets.Open.CharIndex
+	end := tagBrackets.Close.CharIndex - resourceBrackets.Open.CharIndex
+	if start < 0 || end < start || end+1 > len(resourceStr) {
+		logger.Warning("could not locate the tags array inside the resource, leaving it untouched")
+		return resourceStr
+	}
+	baseIndent := lineIndentAt(fullOriginStr, tagBrackets.Open.CharIndex)
+	marshalled, err := json.MarshalIndent(added, baseIndent, "  ")
+	if err != nil {
+		logger.Warning(fmt.Sprintf("failed to marshal tags %s because of error: %s", added, err))
+		return resourceStr
+	}
+
+	return resourceStr[:start] + string(marshalled) + resourceStr[end+1:]
+}
+
+// lineIndentAt returns the leading whitespace of the line containing `index`.
+func lineIndentAt(str string, index int) string {
+	if index < 0 || index > len(str) {
+		return ""
+	}
+	lineStart := strings.LastIndex(str[:index], "\n") + 1
+	indent := ""
+	for i := lineStart; i < len(str); i++ {
+		if str[i] != ' ' && str[i] != '\t' {
+			break
+		}
+		indent += string(str[i])
+	}
+
+	return indent
 }
 
 func UpdateExistingTags(tagsLinesList []string, diff []*tags.TagDiff) {
@@ -261,11 +347,18 @@ func ReplaceTagValue(tagLine string, valueToSet string) string {
 
 // findIndent finds the indentation in a string `str` from starting char index until `charToStop` is identified
 // if a newline is encountered, restart the indentation to ""
+// A negative startIndex, or a `charToStop` that never appears, yields "" rather than
+// reading past either end of the string.
 func findIndent(str string, charToStop byte, startIndex int) string {
 	indent := ""
-	charIndex := startIndex
-	currChar := str[charIndex]
-	for currChar != charToStop {
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	for charIndex := startIndex; charIndex < len(str); charIndex++ {
+		currChar := str[charIndex]
+		if currChar == charToStop {
+			return indent
+		}
 		if utils.IsCharWhitespace(currChar) {
 			if currChar == '\n' {
 				indent = ""
@@ -275,11 +368,21 @@ func findIndent(str string, charToStop byte, startIndex int) string {
 		} else {
 			indent = ""
 		}
-		charIndex++
-		currChar = str[charIndex]
 	}
 
 	return indent
+}
+
+// trimIndentBy drops `n` characters from the end of an indentation string, clamping
+// instead of panicking when `n` is negative or longer than the string.
+func trimIndentBy(indent string, n int) string {
+	if n <= 0 {
+		return indent
+	}
+	if n >= len(indent) {
+		return ""
+	}
+	return indent[:len(indent)-n]
 }
 
 // getJSONStr marshals an interface into json and return a string of that json
@@ -315,12 +418,37 @@ func MapResourcesLineJSON(filePath string, resourceNames []string) (map[string]*
 	return resourceToLines, bracketPairs
 }
 
-// MapBracketsInString finds all brackets in a string
+// MapBracketsInString finds all brackets in a string, ignoring any that appear
+// inside a JSON string literal. Counting brackets inside string values throws the
+// open/close pairing off, which both misplaces tags and can leave a close bracket
+// with no matching open one - a template with a brace in a Description, an inline
+// IAM policy or a UserData script was enough to do it.
 func MapBracketsInString(str string) []Brackets {
 	allBrackets := make([]Brackets, 0)
 	lineCounter := 1
+	inString := false
+	escaped := false
 	for cIndex, c := range str {
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			case c == '\n':
+				// A raw newline cannot appear inside a JSON string, so treat it as the
+				// end of one. Without this an unbalanced quote would swallow the rest
+				// of the file and every bracket after it.
+				inString = false
+				lineCounter++
+			}
+			continue
+		}
 		switch c {
+		case '"':
+			inString = true
 		case '{':
 			allBrackets = append(allBrackets, Brackets{Type: OpenBrackets, Shape: CurlyBrackets, Line: lineCounter, CharIndex: cIndex})
 		case '}':
@@ -351,7 +479,9 @@ func GetBracketsPairs(bracketsInString []Brackets) map[int]BracketPair {
 			stack = append(stack, bracket)
 			bracketShape2BracketsStacks[bracket.Shape] = stack
 		} else {
-			if !ok {
+			// `ok` only tells us this bracket shape was seen before, not that there is
+			// still an unmatched open bracket to pair with, so the stack can be empty here.
+			if !ok || len(stack) == 0 {
 				logger.Warning("malformed json file", "SILENT")
 				return startCharToBrackets
 			}
@@ -405,10 +535,20 @@ func getKeyIndex(str string, key string, linesRange *structure.Lines) int {
 	var indexOfKey int
 	if linesRange.Start != -1 {
 		fileLines := strings.Split(str, "\n")
-		beforeRange := strings.Join(fileLines[:linesRange.Start], "\n")
-		rangeLinesStr := fileLines[linesRange.Start]
-		if linesRange.Start < linesRange.End {
-			rangeLinesStr = strings.Join(fileLines[linesRange.Start:linesRange.End], "\n")
+		// The line numbers recorded by MapBracketsInString are 1-based while fileLines
+		// is 0-based. That mismatch shifts which lines get searched and is deliberately
+		// left alone here (fixing it changes the line numbers yor reports and tags
+		// with); these bounds only stop it from indexing off the end of the slice - a
+		// JSON file with no trailing newline was enough to do that.
+		start := clampLineIndex(linesRange.Start, len(fileLines))
+		end := clampLineIndex(linesRange.End, len(fileLines))
+		beforeRange := strings.Join(fileLines[:start], "\n")
+		rangeLinesStr := ""
+		switch {
+		case start < end:
+			rangeLinesStr = strings.Join(fileLines[start:end], "\n")
+		case start < len(fileLines):
+			rangeLinesStr = fileLines[start]
 		}
 		indexOfKey = findJSONKeyIndex(rangeLinesStr, key)
 		indexOfKey = len(beforeRange) + indexOfKey + 1 // add 1 for the lost newline
@@ -417,6 +557,16 @@ func getKeyIndex(str string, key string, linesRange *structure.Lines) int {
 	}
 
 	return indexOfKey
+}
+
+func clampLineIndex(line int, lineCount int) int {
+	if line < 0 {
+		return 0
+	}
+	if line > lineCount {
+		return lineCount
+	}
+	return line
 }
 
 // FindWrappingBrackets given a brackets pair, find the pair that wraps them
@@ -453,6 +603,10 @@ func FindParentIdentifier(str string, childIdentifier string) string {
 		return ""
 	}
 	quoteMarksIndexes := r.FindAllStringIndex(str[:wrappingBracketsScope.Open.CharIndex], -1)
+	if len(quoteMarksIndexes) < 2 {
+		// No quoted identifier precedes the wrapping brackets, so there is no parent name to read.
+		return ""
+	}
 	indexOfLastQuoteMark := quoteMarksIndexes[len(quoteMarksIndexes)-1][0]
 	indexOfSecondToLastQuoteMark := quoteMarksIndexes[len(quoteMarksIndexes)-2][0]
 	parentIdentifier := str[indexOfSecondToLastQuoteMark+1 : indexOfLastQuoteMark]
