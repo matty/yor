@@ -197,34 +197,56 @@ func getKeyFromLine(l string, isCfn bool) string {
 	return ""
 }
 
+// UpdateExistingCFNTags rewrites the value of every tag in tagsLinesList that appears in
+// diff, in place.
+//
+// Key and Value may appear in either order within a list entry, so each entry is
+// resolved as a unit. The previous implementation carried a pending Value line across
+// entries and only cleared it when a Key matched, so an updated tag wrote its new value
+// onto the *preceding* tag's Value line and left its own value stale. It also built a
+// regexp from the tag key, which panicked in MustCompile for a key containing regex
+// metacharacters.
 func UpdateExistingCFNTags(tagsLinesList []string, diff []*tags.TagDiff) {
-	currentValueLine := -1
-	valueToSet := ""
+	newValueByKey := make(map[string]string, len(diff))
+	for _, tagDiff := range diff {
+		newValueByKey[tagDiff.Key] = tagDiff.NewValue
+	}
+
+	keyLine, valueLine := -1, -1
+	tagKey := ""
+	applyPendingTag := func() {
+		if keyLine >= 0 && valueLine >= 0 {
+			if newValue, ok := newValueByKey[tagKey]; ok {
+				tagsLinesList[valueLine] = ReplaceTagValue(tagsLinesList[valueLine], newValue)
+			}
+		}
+		keyLine, valueLine, tagKey = -1, -1, ""
+	}
 
 	for i, tagLine := range tagsLinesList {
+		if strings.HasPrefix(strings.TrimSpace(tagLine), "-") {
+			// A new list entry starts here, so anything pending belongs to the previous tag.
+			applyPendingTag()
+		}
 		if strings.Contains(tagLine, ` Key:`) {
-			for _, tag := range diff {
-				keyr := regexp.MustCompile(`\b` + tag.Key + `\b`)
-				if keyr.Match([]byte(tagLine)) {
-					if currentValueLine > -1 {
-						tagsLinesList[currentValueLine] = ReplaceTagValue(tagsLinesList[currentValueLine], tag.NewValue)
-						currentValueLine = -1
-					} else {
-						valueToSet = tag.NewValue
-					}
-					continue
-				}
-			}
+			keyLine = i
+			tagKey = extractCFNTagKeyName(tagLine)
 		}
 		if strings.Contains(tagLine, ` Value:`) {
-			if valueToSet != "" {
-				tagsLinesList[i] = ReplaceTagValue(tagLine, valueToSet)
-				valueToSet = ""
-			} else {
-				currentValueLine = i
-			}
+			valueLine = i
 		}
 	}
+	applyPendingTag()
+}
+
+// extractCFNTagKeyName pulls the tag name out of a `Key: <name>` line, quoted or not.
+func extractCFNTagKeyName(tagLine string) string {
+	_, after, found := strings.Cut(tagLine, "Key:")
+	if !found {
+		return ""
+	}
+
+	return strings.Trim(strings.TrimSpace(after), `"'`)
 }
 
 func ReplaceTagValue(line string, value string) string {
