@@ -97,10 +97,15 @@ func (g *GitService) setOrgAndName() error {
 	return nil
 }
 
+// ComputeRelativeFilePath maps a scanned file to its path inside the repository, as git
+// records it - which always uses forward slashes. filepath.Join and filepath.Rel produce
+// the OS separator, so on Windows this returned paths like "terraform\aws\s3.tf" and
+// git.Blame answered "file not found": no resource below the scan root could be git
+// tagged at all.
 func (g *GitService) ComputeRelativeFilePath(fp string) string {
 	if strings.HasPrefix(fp, g.gitRootDir) {
 		res, _ := filepath.Rel(g.gitRootDir, fp)
-		return filepath.Join(g.scanPathFromRoot, res)
+		return filepath.ToSlash(filepath.Join(g.scanPathFromRoot, res))
 	}
 	scanPathIter := g.scanPathFromRoot
 	parent := filepath.Dir(fp)
@@ -111,7 +116,7 @@ func (g *GitService) ComputeRelativeFilePath(fp string) string {
 		}
 		scanPathIter, _ = filepath.Split(scanPathIter)
 	}
-	return filepath.Join(scanPathIter, fp)
+	return filepath.ToSlash(filepath.Join(scanPathIter, fp))
 }
 
 func (g *GitService) GetBlameForFileLines(filePath string, lines structure.Lines) (*GitBlame, error) {
