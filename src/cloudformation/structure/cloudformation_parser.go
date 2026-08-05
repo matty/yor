@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 
 	goformationTags "github.com/awslabs/goformation/v5/cloudformation/tags"
 	"github.com/bridgecrewio/goformation/v5"
@@ -34,8 +33,6 @@ type CloudformationParser struct {
 const TagsAttributeName = "Tags"
 const ResourcesStartToken = "Resources"
 const EnvVarsPath = "Resources/*/Properties/Environment/Variables/*"
-
-var goformationLock sync.Mutex
 
 func (p *CloudformationParser) Name() string {
 	return "CloudFormation"
@@ -114,9 +111,9 @@ func goformationParse(file string) (*cloudformation.Template, error) {
 
 func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, error) {
 	var skipResourcesByComment []string
-	goformationLock.Lock()
+	yaml.GoformationLock.Lock()
 	template, err := goformationParse(filePath)
-	goformationLock.Unlock()
+	yaml.GoformationLock.Unlock()
 	if err != nil || template == nil {
 		logger.Warning(fmt.Sprintf("There was an error processing the cloudformation template %v: %s", filePath, err))
 		if err == nil {
