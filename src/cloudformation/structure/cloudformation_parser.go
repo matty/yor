@@ -29,7 +29,6 @@ import (
 type CloudformationParser struct {
 	*types.YamlParser
 	*types.JSONParser
-	skippedByCommentList []string
 }
 
 const TagsAttributeName = "Tags"
@@ -141,7 +140,6 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 		switch utils.GetFileFormat(filePath) {
 		case common.YmlFileType.FileFormat, common.YamlFileType.FileFormat:
 			resourceNamesToLines, skipResourcesByComment = yaml.MapResourcesLineYAML(filePath, resourceNames, ResourcesStartToken)
-			p.skippedByCommentList = append(p.skippedByCommentList, skipResourcesByComment...)
 		case common.JSONFileType.FileFormat:
 			var fileBracketsMapping map[int]json.BracketPair
 			resourceNamesToLines, fileBracketsMapping = json.MapResourcesLineJSON(filePath, resourceNames)
@@ -189,6 +187,7 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 					TagLines:          tagsLines,
 					Name:              resourceName,
 					Type:              resourceType,
+					SkippedByComment:  utils.InSlice(skipResourcesByComment, resourceName),
 				},
 			}
 			parsedBlocks = append(parsedBlocks, cfnBlock)
@@ -317,7 +316,4 @@ func (p *CloudformationParser) getTagsLines(filePath string, resourceLinesRange 
 	default:
 		return structure.Lines{Start: -1, End: -1}
 	}
-}
-func (p *CloudformationParser) GetSkipResourcesByComment() []string {
-	return p.skippedByCommentList
 }

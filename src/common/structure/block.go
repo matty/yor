@@ -33,6 +33,7 @@ type IBlock interface {
 	MergeTags() []tags.ITag
 	CalculateTagsDiff() *TagDiff
 	IsBlockTaggable() bool
+	IsSkippedByComment() bool
 	GetResourceID() string
 	GetTagsLines() Lines
 	GetSeparator() string
@@ -53,6 +54,11 @@ type Block struct {
 	TagLines          Lines
 	Name              string
 	Type              string
+	// SkippedByComment records a #yor:skip or #yor:skipall comment found next to this
+	// block while its file was parsed. It belongs to the block rather than to the parser:
+	// held on the parser it accumulated across every file and was matched by resource id,
+	// so a skip in one file silenced identically named resources in all the others.
+	SkippedByComment bool
 }
 
 func (b *Block) Init(filePath string, rawBlock interface{}) {
@@ -190,6 +196,10 @@ func (b *Block) GetNewTags() []tags.ITag {
 
 func (b *Block) IsBlockTaggable() bool {
 	return b.IsTaggable
+}
+
+func (b *Block) IsSkippedByComment() bool {
+	return b.SkippedByComment
 }
 
 func (b *Block) GetFilePath() string {

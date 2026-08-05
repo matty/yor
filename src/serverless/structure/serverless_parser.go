@@ -24,8 +24,7 @@ const FunctionsSectionName = "functions"
 const FunctionType = "function"
 
 type ServerlessParser struct {
-	YamlParser           types.YamlParser
-	skippedByCommentList []string
+	YamlParser types.YamlParser
 }
 
 var slsParseLock sync.Mutex
@@ -102,7 +101,6 @@ func (p *ServerlessParser) ParseFile(filePath string) ([]structure.IBlock, error
 	switch utils.GetFileFormat(filePath) {
 	case common.YmlFileType.FileFormat, common.YamlFileType.FileFormat:
 		resourceNamesToLines, skipResourcesByComment = yamlUtils.MapResourcesLineYAML(filePath, resourceNames, FunctionsSectionName)
-		p.skippedByCommentList = append(p.skippedByCommentList, skipResourcesByComment...)
 	default:
 		return nil, fmt.Errorf("unsupported file type %s", utils.GetFileFormat(filePath))
 	}
@@ -145,6 +143,7 @@ func (p *ServerlessParser) ParseFile(filePath string) ([]structure.IBlock, error
 				TagLines:          tagsLines,
 				Name:              funcName,
 				Type:              FunctionType,
+				SkippedByComment:  utils.InSlice(skipResourcesByComment, funcName),
 			},
 		}
 
@@ -153,9 +152,6 @@ func (p *ServerlessParser) ParseFile(filePath string) ([]structure.IBlock, error
 
 	}
 	return parsedBlocks, nil
-}
-func (p *ServerlessParser) GetSkipResourcesByComment() []string {
-	return p.skippedByCommentList
 }
 
 func (p *ServerlessParser) WriteFile(readFilePath string, blocks []structure.IBlock, writeFilePath string) error {

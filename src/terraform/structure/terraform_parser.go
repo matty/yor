@@ -43,8 +43,10 @@ type TerraformParser struct {
 	tagLocalModules        bool
 	terraformModule        *TerraformModule
 	moduleInstallDir       string
-	downloadedPaths        []string
-	skippedByCommentList   []string
+	// downloadedPaths records which files have already had their modules downloaded. The
+	// runner shares one parser across its workers, so an unsynchronised slice append here
+	// was a data race.
+	downloadedPaths sync.Map
 }
 
 func (p *TerraformParser) Name() string {
@@ -185,7 +187,7 @@ func (p *TerraformParser) ParseFile(filePath string) ([]structure.IBlock, error)
 			}
 
 			if strings.ToUpper(strings.TrimSpace(lineAbove)) == "#YOR:SKIP" || skipAll {
-				p.skippedByCommentList = append(p.skippedByCommentList, terraformBlock.GetResourceID())
+				terraformBlock.SkippedByComment = true
 			}
 		}
 		parsedBlocks = append(parsedBlocks, terraformBlock)
@@ -193,10 +195,6 @@ func (p *TerraformParser) ParseFile(filePath string) ([]structure.IBlock, error)
 
 	return parsedBlocks, nil
 }
-func (p *TerraformParser) GetSkipResourcesByComment() []string {
-	return p.skippedByCommentList
-}
-
 func (p *TerraformParser) WriteFile(readFilePath string, blocks []structure.IBlock, writeFilePath string) error {
 	// #nosec G304
 	// read file bytes
@@ -602,14 +600,12 @@ func ExtractProviderFromModuleSrc(source string) string {
 func (p *TerraformParser) isModuleTaggable(fp string, moduleName string, moduleSource string, moduleDir string, tagAtts []string) (bool, string) {
 	logger.Info(fmt.Sprintf("Searching module %v for %v", moduleName, tagAtts))
 	downloadDir := filepath.Join(p.moduleInstallDir, moduleName)
-	if !utils.InSlice(p.downloadedPaths, fp) && os.Getenv("YOR_DISABLE_TF_MODULE_DOWNLOAD") != "TRUE" {
-		logger.MuteOutputBlock(func() {
-			logger.Info(fmt.Sprintf("Downloading module %v from %v\n", moduleName, moduleSource))
-			if err := p.downloadModule(moduleSource, downloadDir); err != nil {
-				logger.Warning(fmt.Sprintf("could not download module %v: %s", moduleName, err))
-			}
-			p.downloadedPaths = append(p.downloadedPaths, fp)
-		})
+	if _, alreadyDownloaded := p.downloadedPaths.Load(fp); !alreadyDownloaded && os.Getenv("YOR_DISABLE_TF_MODULE_DOWNLOAD") != "TRUE" {
+		logger.Info(fmt.Sprintf("Downloading module %v from %v\n", moduleName, moduleSource))
+		if err := p.downloadModule(moduleSource, downloadDir); err != nil {
+			logger.Warning(fmt.Sprintf("could not download module %v: %s", moduleName, err))
+		}
+		p.downloadedPaths.Store(fp, struct{}{})
 	}
 	expectedModuleDir := filepath.Join(p.moduleInstallDir, moduleName, moduleDir)
 	if _, err := os.Stat(expectedModuleDir); os.IsNotExist(err) {

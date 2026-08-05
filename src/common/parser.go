@@ -10,6 +10,5 @@ type IParser interface {
 	WriteFile(readFilePath string, blocks []structure.IBlock, writeFilePath string) error
 	GetSkippedDirs() []string
 	GetSupportedFileExtensions() []string
-	GetSkipResourcesByComment() []string
 	Close()
 }
