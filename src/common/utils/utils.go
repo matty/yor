@@ -61,15 +61,27 @@ func AllNil(vv ...interface{}) bool {
 	return true
 }
 
-func GetFileScanner(filePath string, nonFoundLines *structure.Lines) (*bufio.Scanner, *structure.Lines) {
+// GetFileScanner opens filePath for line-by-line reading. The returned closer must be
+// called by the caller - the file used to be left open on every call, leaking a
+// descriptor per scanned file.
+//
+// On failure the scanner is nil, which every caller used to dereference straight away.
+// Callers should check it.
+func GetFileScanner(filePath string, nonFoundLines *structure.Lines) (*bufio.Scanner, func(), *structure.Lines) {
 	//#nosec G304
 	file, err := os.Open(filePath)
 	if err != nil {
 		logger.Warning(fmt.Sprintf("failed to read file %s", filePath))
-		return nil, nonFoundLines
+		return nil, func() {}, nonFoundLines
+	}
+	closeFile := func() {
+		if closeErr := file.Close(); closeErr != nil {
+			logger.Warning(fmt.Sprintf("failed to close file %s: %s", filePath, closeErr))
+		}
 	}
 	scanner := bufio.NewScanner(file)
-	return scanner, nonFoundLines
+
+	return scanner, closeFile, nonFoundLines
 }
 
 // CreateClosedTempFile creates an empty temp file in dir and returns its path with no

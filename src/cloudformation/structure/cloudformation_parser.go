@@ -150,21 +150,33 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 			return nil, fmt.Errorf("unsupported file type %s", utils.GetFileFormat(filePath))
 		}
 
-		minResourceLine := math.MaxInt8
+		// math.MaxInt8 is 127, so any template whose resources all start after line 127
+		// used to report 127 as the start of the resources block.
+		minResourceLine := math.MaxInt
 		maxResourceLine := 0
 		parsedBlocks := make([]structure.IBlock, 0)
 		for resourceName := range template.Resources {
 			resource := template.Resources[resourceName]
 			resourceType := resource.AWSCloudFormationType()
-			lines := resourceNamesToLines[resourceName]
+			lines, ok := resourceNamesToLines[resourceName]
+			if !ok || lines == nil {
+				// The line mappers return a nil map when the file cannot be read, and
+				// goformation can resolve a resource that the textual mapper does not find.
+				logger.Warning(fmt.Sprintf("could not map resource %s in file %s to lines, skipping it", resourceName, filePath))
+				continue
+			}
 			isTaggable, tagsValue := utils.StructContainsProperty(resource, TagsAttributeName)
 			tagsLines := structure.Lines{Start: -1, End: -1}
 			var existingTags []tags.ITag
 			if isTaggable {
 				tagsLines, existingTags = p.extractTagsAndLines(filePath, lines, tagsValue)
 			}
-			minResourceLine = int(math.Min(float64(minResourceLine), float64(lines.Start)))
-			maxResourceLine = int(math.Max(float64(maxResourceLine), float64(lines.End)))
+			if lines.Start < minResourceLine {
+				minResourceLine = lines.Start
+			}
+			if lines.End > maxResourceLine {
+				maxResourceLine = lines.End
+			}
 
 			cfnBlock := &CloudformationBlock{
 				Block: structure.Block{
@@ -182,7 +194,9 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 			parsedBlocks = append(parsedBlocks, cfnBlock)
 		}
 
-		p.FileToResourcesLines.Store(filePath, structure.Lines{Start: minResourceLine, End: maxResourceLine})
+		if len(parsedBlocks) > 0 {
+			p.FileToResourcesLines.Store(filePath, structure.Lines{Start: minResourceLine, End: maxResourceLine})
+		}
 
 		return parsedBlocks, nil
 	}
@@ -267,7 +281,11 @@ func (p *CloudformationParser) getTagsLines(filePath string, resourceLinesRange 
 	nonFoundLines := structure.Lines{Start: -1, End: -1}
 	switch utils.GetFileFormat(filePath) {
 	case common.YamlFileType.FileFormat, common.YmlFileType.FileFormat:
-		scanner, _ := utils.GetFileScanner(filePath, &nonFoundLines)
+		scanner, closeFile, _ := utils.GetFileScanner(filePath, &nonFoundLines)
+		if scanner == nil {
+			return nonFoundLines
+		}
+		defer closeFile()
 		resourceLinesText := make([]string, 0)
 		// iterate file line by line
 		lineCounter := 0
