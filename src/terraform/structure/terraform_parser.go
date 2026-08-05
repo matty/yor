@@ -141,7 +141,11 @@ func (p *TerraformParser) ParseFile(filePath string) ([]structure.IBlock, error)
 		return nil, fmt.Errorf("failed to parse hcl file %s", filePath)
 	}
 
-	syntaxBlocks := hclSyntaxFile.Body.(*hclsyntax.Body).Blocks
+	syntaxBody, ok := hclSyntaxFile.Body.(*hclsyntax.Body)
+	if !ok {
+		return nil, fmt.Errorf("unexpected body type %T in hcl file %s", hclSyntaxFile.Body, filePath)
+	}
+	syntaxBlocks := syntaxBody.Blocks
 
 	skipAll := false
 	rawBlocks := hclFile.Body().Blocks()
@@ -163,6 +167,12 @@ func (p *TerraformParser) ParseFile(filePath string) ([]structure.IBlock, error)
 		}
 		if terraformBlock == nil {
 			logger.Warning(fmt.Sprintf("Found a malformed block according to block scheme %v", blockID))
+			continue
+		}
+		if i >= len(syntaxBlocks) {
+			// hclwrite and hclsyntax parse the same source, so the block lists line up in
+			// practice; guard the cross-index rather than trust that they always will.
+			logger.Warning(fmt.Sprintf("block %s in %s has no matching syntax block, skipping it", blockID, filePath))
 			continue
 		}
 		terraformBlock.Init(filePath, block)
@@ -479,6 +489,12 @@ func (p *TerraformParser) parseBlock(hclBlock *hclwrite.Block, filePath string) 
 
 	switch hclBlock.Type() {
 	case ResourceBlockType:
+		// hclwrite parses a block header without validating it against a schema, so
+		// `resource { ... }` with no labels reaches us and used to panic here, taking the
+		// whole directory scan down with it.
+		if len(hclBlock.Labels()) == 0 {
+			return nil, fmt.Errorf("resource block in %s has no type label", filePath)
+		}
 		resourceType = hclBlock.Labels()[0]
 		providerName := getProviderFromResourceType(resourceType)
 		if utils.InSlice(SkippedProviders, providerName) {
@@ -704,6 +720,9 @@ func resolveRegistryModuleSource(source string) (string, error) {
 }
 
 func (p *TerraformParser) getTagsAttributeName(hclBlock *hclwrite.Block) (string, error) {
+	if len(hclBlock.Labels()) == 0 {
+		return "", fmt.Errorf("block of type %s has no labels", hclBlock.Type())
+	}
 	resourceType := hclBlock.Labels()[0]
 	tagsAttributeName, err := getTagAttributeByResourceType(resourceType)
 	if err != nil {
@@ -747,6 +766,9 @@ func (p *TerraformParser) getExistingTags(hclBlock *hclwrite.Block, tagsAttribut
 }
 
 func (p *TerraformParser) isBlockTaggable(hclBlock *hclwrite.Block) bool {
+	if len(hclBlock.Labels()) == 0 {
+		return false
+	}
 	resourceType := hclBlock.Labels()[0]
 	if utils.InSlice(unsupportedTerraformBlocks, resourceType) {
 		return false
