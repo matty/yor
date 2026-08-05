@@ -11,6 +11,7 @@ import (
 	"github.com/bridgecrewio/yor/src/common/structure"
 	"github.com/bridgecrewio/yor/src/common/tagging/simple"
 	"github.com/bridgecrewio/yor/src/common/tagging/tags"
+	"github.com/bridgecrewio/yor/src/common/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -79,13 +80,16 @@ func TestServerlessWriting(t *testing.T) {
 				},
 			},
 		}
-		f, _ := os.CreateTemp(directory, "serverless.*.yaml")
-		err := WriteYAMLFile(readFilePath, slsBlocks, f.Name(), "tags", "functions")
+		tempFilePath, tempErr := utils.CreateClosedTempFile(directory, "serverless.*.yaml")
+		if tempErr != nil {
+			t.Fatal(tempErr)
+		}
+		err := WriteYAMLFile(readFilePath, slsBlocks, tempFilePath, "tags", "functions")
 		if err != nil {
 			assert.Fail(t, err.Error())
 		}
 		expectedFilePath, _ := filepath.Abs(relExpectedPath)
-		actualFilePath, _ := filepath.Abs(f.Name())
+		actualFilePath, _ := filepath.Abs(tempFilePath)
 		expected, _ := os.ReadFile(expectedFilePath)
 		actualOutput, _ := os.ReadFile(actualFilePath)
 		assert.Equal(t, string(expected), string(actualOutput))
@@ -94,7 +98,7 @@ func TestServerlessWriting(t *testing.T) {
 			if err != nil {
 				t.Fail()
 			}
-		}(f.Name())
+		}(tempFilePath)
 
 	})
 }
@@ -139,18 +143,21 @@ func TestCFNWriting(t *testing.T) {
 				},
 			},
 		}
-		f, _ := os.CreateTemp(directory, "base.*.template")
-		err := WriteYAMLFile(readFilePath, blocks, f.Name(), "Tags", "Resources")
+		tempFilePath, tempErr := utils.CreateClosedTempFile(directory, "base.*.template")
+		if tempErr != nil {
+			t.Fatal(tempErr)
+		}
+		err := WriteYAMLFile(readFilePath, blocks, tempFilePath, "Tags", "Resources")
 		if err != nil {
 			assert.Fail(t, err.Error())
 		}
 		expectedFilePath := filepath.Join(directory, "expected.txt")
-		actualFilePath, _ := filepath.Abs(f.Name())
+		actualFilePath, _ := filepath.Abs(tempFilePath)
 		expected, _ := os.ReadFile(expectedFilePath)
 		actualOutput, _ := os.ReadFile(actualFilePath)
 		assert.Equal(t, string(expected), string(actualOutput))
 		defer func() {
-			_ = os.Remove(f.Name())
+			_ = os.Remove(tempFilePath)
 		}()
 
 	})

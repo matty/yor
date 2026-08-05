@@ -153,18 +153,21 @@ func (p *ServerlessParser) WriteFile(readFilePath string, blocks []structure.IBl
 		block := block.(*ServerlessBlock)
 		block.UpdateTags()
 	}
-	tempFile, err := os.CreateTemp(filepath.Dir(readFilePath), "temp.*.yaml")
+	tempFilePath, err := utils.CreateClosedTempFile(filepath.Dir(readFilePath), "temp.*.yaml")
+	if err != nil {
+		return err
+	}
 	defer func() {
-		_ = os.Remove(tempFile.Name())
+		if removeErr := os.Remove(tempFilePath); removeErr != nil {
+			logger.Warning(fmt.Sprintf("failed to remove temp file %s: %s", tempFilePath, removeErr))
+		}
 	}()
+
+	err = yamlUtils.WriteYAMLFile(readFilePath, blocks, tempFilePath, FunctionTagsAttributeName, FunctionsSectionName)
 	if err != nil {
 		return err
 	}
-	err = yamlUtils.WriteYAMLFile(readFilePath, blocks, tempFile.Name(), FunctionTagsAttributeName, FunctionsSectionName)
-	if err != nil {
-		return err
-	}
-	_, err = p.ParseFile(tempFile.Name())
+	_, err = p.ParseFile(tempFilePath)
 	if err != nil {
 		return fmt.Errorf("editing file %v resulted in a malformed template, please open a github issue with the relevant details", readFilePath)
 	}
