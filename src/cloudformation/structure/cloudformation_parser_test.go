@@ -1,7 +1,6 @@
 package structure
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +9,7 @@ import (
 	"github.com/bridgecrewio/yor/src/common/structure"
 	"github.com/bridgecrewio/yor/src/common/tagging/simple"
 	"github.com/bridgecrewio/yor/src/common/tagging/tags"
+	"github.com/bridgecrewio/yor/src/common/utils"
 	"github.com/bridgecrewio/yor/src/common/yaml"
 	"github.com/stretchr/testify/assert"
 )
@@ -155,7 +155,10 @@ func Test_mapResourcesLineYAML(t *testing.T) {
 }
 
 func writeCFNTestHelper(t *testing.T, directory string, testFileName string, fileType string) {
-	f, _ := os.CreateTemp(directory, "temp.*."+fileType)
+	tempFilePath, tempErr := utils.CreateClosedTempFile(directory, "temp.*."+fileType)
+	if tempErr != nil {
+		t.Fatal(tempErr)
+	}
 	cfnParser := CloudformationParser{}
 	cfnParser.Init(directory, nil)
 	readFilePath := directory + "/" + testFileName + "." + fileType
@@ -179,20 +182,16 @@ func writeCFNTestHelper(t *testing.T, directory string, testFileName string, fil
 	if err != nil {
 		t.Fail()
 	}
-	_, err = f.Seek(0, io.SeekStart)
-	if err != nil {
-		t.Fail()
-	}
-	err = cfnParser.WriteFile(readFilePath, cfnBlocks, f.Name())
+	err = cfnParser.WriteFile(readFilePath, cfnBlocks, tempFilePath)
 	if err != nil {
 		t.Fail()
 	}
 	expectedAbs, _ := filepath.Abs(writeFilePath)
-	actualAbs, _ := filepath.Abs(f.Name())
+	actualAbs, _ := filepath.Abs(tempFilePath)
 	expectedContent, _ := os.ReadFile(expectedAbs)
 	actualContent, _ := os.ReadFile(actualAbs)
 	defer func() {
-		_ = os.Remove(f.Name())
+		_ = os.Remove(tempFilePath)
 	}()
 	expectedString := string(expectedContent)
 	actualString := string(actualContent)

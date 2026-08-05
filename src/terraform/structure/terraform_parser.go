@@ -219,14 +219,27 @@ func (p *TerraformParser) WriteFile(readFilePath string, blocks []structure.IBlo
 		}
 	}
 
-	tempFile, err := os.CreateTemp(filepath.Dir(readFilePath), "temp.*.tf")
+	tempFilePath, err := utils.CreateClosedTempFile(filepath.Dir(readFilePath), "temp.*.tf")
 	if err != nil {
 		return err
 	}
-	fd, err := os.OpenFile(tempFile.Name(), os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0600)
+	fd, err := os.OpenFile(tempFilePath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
+		_ = os.Remove(tempFilePath)
 		return err
 	}
+	// Windows can't delete a file while a handle is open, so close and remove on every
+	// exit path - the early returns below used to leak both the handle and a temp .tf
+	// sitting next to the sources.
+	defer func() {
+		if closeErr := fd.Close(); closeErr != nil {
+			logger.Warning(fmt.Sprintf("failed to close temp file %s: %s", tempFilePath, closeErr))
+		}
+		if removeErr := os.Remove(tempFilePath); removeErr != nil {
+			logger.Warning(fmt.Sprintf("failed to remove temp file %s: %s", tempFilePath, removeErr))
+		}
+	}()
+
 	hclWriteLock.Lock()
 	defer hclWriteLock.Unlock()
 	_, err = hclFile.WriteTo(fd)
@@ -234,22 +247,9 @@ func (p *TerraformParser) WriteFile(readFilePath string, blocks []structure.IBlo
 		return err
 	}
 
-	_, err = p.ParseFile(tempFile.Name())
+	_, err = p.ParseFile(tempFilePath)
 	if err != nil {
 		return fmt.Errorf("editing file %v resulted in malformed terraform, please open a github issue with the relevant details", readFilePath)
-	}
-	err = tempFile.Close()
-	if err != nil {
-		return err
-	}
-
-	// can't delete files on windows if you dont close them
-	if err = fd.Close(); err != nil {
-		return err
-	}
-	err = os.Remove(tempFile.Name())
-	if err != nil {
-		return err
 	}
 
 	// #nosec G304

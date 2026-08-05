@@ -10,6 +10,7 @@ import (
 	s3tags "github.com/awslabs/goformation/v5/cloudformation/tags"
 	"github.com/bridgecrewio/yor/src/common/structure"
 	"github.com/bridgecrewio/yor/src/common/tagging/tags"
+	"github.com/bridgecrewio/yor/src/common/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -474,19 +475,22 @@ func writeJSONTestHelper(t *testing.T, directory string, testFileName string, ex
 			Name:              "S3Bucket",
 		},
 	}
-	f, _ := os.CreateTemp(directory, testFileName+".*.json")
+	tempFilePath, tempErr := utils.CreateClosedTempFile(directory, testFileName+".*.json")
+	if tempErr != nil {
+		t.Fatal(tempErr)
+	}
 	_, fileBracketsMapping := MapResourcesLineJSON(readFilePath, []string{"S3Bucket"})
-	err := WriteJSONFile(readFilePath, blocks, f.Name(), fileBracketsMapping)
+	err := WriteJSONFile(readFilePath, blocks, tempFilePath, fileBracketsMapping)
 	if err != nil {
 		assert.Fail(t, err.Error())
 	}
 	expectedFilePath := filepath.Join(directory, testFileName+"_expected.json")
-	actualFilePath, _ := filepath.Abs(f.Name())
+	actualFilePath, _ := filepath.Abs(tempFilePath)
 	expected, _ := os.ReadFile(expectedFilePath)
 	actualOutput, _ := os.ReadFile(actualFilePath)
 	assert.Equal(t, string(expected), string(actualOutput))
 	defer func() {
-		_ = os.Remove(f.Name())
+		_ = os.Remove(tempFilePath)
 	}()
 }
 

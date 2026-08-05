@@ -9,6 +9,7 @@ import (
 	"github.com/bridgecrewio/yor/src/common/structure"
 	"github.com/bridgecrewio/yor/src/common/tagging/simple"
 	"github.com/bridgecrewio/yor/src/common/tagging/tags"
+	"github.com/bridgecrewio/yor/src/common/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -65,15 +66,18 @@ func TestServerlessParser_ParseFile(t *testing.T) {
 		}
 		assert.NotNil(t, func1Block)
 		assert.NotNil(t, func2Block)
-		f, _ := os.CreateTemp(directory, "serverless.*.yaml")
-		_ = slsParser.WriteFile(slsFilepath, slsBlocks, f.Name())
+		tempFilePath, tempErr := utils.CreateClosedTempFile(directory, "serverless.*.yaml")
+		if tempErr != nil {
+			t.Fatal(tempErr)
+		}
+		_ = slsParser.WriteFile(slsFilepath, slsBlocks, tempFilePath)
 
 		expected, _ := os.ReadFile(expectedSlsFilepath)
-		actual, _ := os.ReadFile(f.Name())
+		actual, _ := os.ReadFile(tempFilePath)
 
 		assert.Equal(t, string(expected), string(actual))
 
-		defer func() { _ = os.Remove(f.Name()) }()
+		defer func() { _ = os.Remove(tempFilePath) }()
 	})
 }
 
@@ -210,13 +214,16 @@ func Test_mapResourcesLineYAML(t *testing.T) {
 		if err != nil {
 			t.Fail()
 		}
-		f, _ := os.CreateTemp(directory, "serverless.*.yaml")
-		err = slsParser.WriteFile(readFilePath, slsBlocks, f.Name())
+		tempFilePath, tempErr := utils.CreateClosedTempFile(directory, "serverless.*.yaml")
+		if tempErr != nil {
+			t.Fatal(tempErr)
+		}
+		err = slsParser.WriteFile(readFilePath, slsBlocks, tempFilePath)
 		if err != nil {
 			t.Fail()
 		}
 		expectedFilePath, _ := filepath.Abs(writeFilePath)
-		actualFilePath, _ := filepath.Abs(f.Name())
+		actualFilePath, _ := filepath.Abs(tempFilePath)
 		expected, _ := os.ReadFile(expectedFilePath)
 		actualOutput, _ := os.ReadFile(actualFilePath)
 		assert.Equal(t, string(expected), string(actualOutput))
@@ -225,7 +232,7 @@ func Test_mapResourcesLineYAML(t *testing.T) {
 			if err != nil {
 				t.Fail()
 			}
-		}(f.Name())
+		}(tempFilePath)
 
 	})
 }
