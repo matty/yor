@@ -104,21 +104,26 @@ func (t *TagGroup) CreateTagsForBlock(block structure.IBlock) error {
 func (t *TagGroup) getBlockLinesInGit(block structure.IBlock, linesMap fileLineMapper) structure.Lines {
 	blockLines := block.GetLines()
 	originToGit := linesMap.originToGit
-	originStart := blockLines.Start
-	originEnd := blockLines.End
-	gitStart := -1
-	gitEnd := -1
 
-	for gitStart == -1 && originStart <= originEnd {
-		// find the first mapped line
-		gitStart = originToGit[originStart]
-		originStart++
+	// Git line numbers are 1-based, so only a positive mapping counts as resolved. A line
+	// that is absent from the map read back as 0, which then passed the "< 0" check in
+	// CreateTagsForBlock and became a negative index into the blame result.
+	gitStart := -1
+	for origin := blockLines.Start; origin <= blockLines.End; origin++ {
+		if mapped, ok := originToGit[origin]; ok && mapped > 0 {
+			// first mapped line
+			gitStart = mapped
+			break
+		}
 	}
 
-	for gitEnd == -1 && originEnd >= blockLines.Start {
-		// find the last mapped line
-		gitEnd = originToGit[originEnd]
-		originEnd--
+	gitEnd := -1
+	for origin := blockLines.End; origin >= blockLines.Start; origin-- {
+		if mapped, ok := originToGit[origin]; ok && mapped > 0 {
+			// last mapped line
+			gitEnd = mapped
+			break
+		}
 	}
 
 	return structure.Lines{Start: gitStart, End: gitEnd}
@@ -184,8 +189,13 @@ func (t *TagGroup) updateBlameForOriginLines(block structure.IBlock, blame *gits
 				Date:   time.Now().UTC(),
 				Hash:   plumbing.ZeroHash,
 			}
+		} else if gitLine, ok := gitBlameLines[fileMapping[blockLine]]; ok && gitLine != nil {
+			newBlameByLines[blockLine] = gitLine
 		} else {
-			newBlameByLines[blockLine] = gitBlameLines[fileMapping[blockLine]]
+			// The blame result does not cover this line - it can stop short of the block.
+			// Recording a nil made GetLatestCommit abandon the whole block (it treats any
+			// nil as "not committed yet") and every consumer dereference it.
+			logger.Debug(fmt.Sprintf("no blame entry for line %d of %s, skipping it", blockLine, block.GetResourceID()))
 		}
 	}
 
@@ -195,9 +205,23 @@ func (t *TagGroup) updateBlameForOriginLines(block structure.IBlock, blame *gits
 func (t *TagGroup) hasNonTagChanges(blame *gitservice.GitBlame, block structure.IBlock) bool {
 	tagsLines := block.GetTagsLines()
 	latestBlame := blame.GetLatestCommit()
+	if latestBlame == nil {
+		// GetLatestCommit returns nil by design when there is nothing to compare against:
+		// no blame lines at all, or every line of the block last touched by a bot. A repo
+		// whose IaC was last committed by yor's own action, dependabot or renovate lands
+		// here. Its siblings in this package already treat that as "unavailable"; without
+		// a latest commit we cannot separate tag-only changes from real ones, so report
+		// no changes rather than dereferencing nil.
+		logger.Debug(fmt.Sprintf("no latest commit available for %s, treating it as unchanged", block.GetResourceID()))
+		return false
+	}
 	hasTags := tagsLines.Start != -1 && tagsLines.End != -1
+	latestHash := latestBlame.Hash.String()
 	for lineNum, line := range blame.BlamesByLine {
-		if line.Hash.String() == latestBlame.Hash.String() &&
+		if line == nil {
+			continue
+		}
+		if line.Hash.String() == latestHash &&
 			(!hasTags || lineNum <= tagsLines.Start || lineNum >= tagsLines.End) {
 			return true
 		}

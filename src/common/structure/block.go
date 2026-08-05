@@ -111,7 +111,15 @@ func (b *Block) AddNewTags(newTags []tags.ITag) {
 		return b.NewTags[i].GetKey() > b.NewTags[j].GetKey()
 	})
 	if limit, ok := SpecialResourceTypes[b.GetResourceType()]; ok && len(b.NewTags)+len(b.ExitingTags) > limit {
-		b.NewTags = b.NewTags[0 : limit-len(b.ExitingTags)]
+		// The resource may already carry more tags than the limit allows, which made this
+		// bound negative - an aws_db_proxy with more than 10 existing tags panicked here.
+		room := limit - len(b.ExitingTags)
+		if room < 0 {
+			room = 0
+		}
+		if room < len(b.NewTags) {
+			b.NewTags = b.NewTags[:room]
+		}
 	}
 }
 
