@@ -42,6 +42,7 @@ type Runner struct {
 }
 
 const WorkersNumEnvKey = "YOR_WORKER_NUM"
+const DefaultWorkersNum = "10"
 
 func (r *Runner) Init(commands *clioptions.TagOptions) error {
 	dir := commands.Directory
@@ -103,9 +104,13 @@ func (r *Runner) Init(commands *clioptions.TagOptions) error {
 	r.skippedResourceTypes = commands.SkipResourceTypes
 	r.skippedResources = commands.SkipResources
 	var convErr error
-	r.workersNum, convErr = strconv.Atoi(utils.GetEnv(WorkersNumEnvKey, "10"))
-	if convErr != nil {
-		logger.Error(fmt.Sprintf("Got an invalid value for YOR_WORKERS_NUM, %v. If you didn't mean to leverage this option, please unset %v", os.Getenv(WorkersNumEnvKey), WorkersNumEnvKey))
+	r.workersNum, convErr = strconv.Atoi(utils.GetEnv(WorkersNumEnvKey, DefaultWorkersNum))
+	// A value of 0 or less parses cleanly but starts no workers at all, and the send on
+	// the unbuffered file channel then blocks for ever: "all goroutines are asleep -
+	// deadlock!". Reject it the same way as a value that is not a number.
+	if convErr != nil || r.workersNum < 1 {
+		logger.Error(fmt.Sprintf("Got an invalid value for %v, %q. It must be a positive whole number. If you didn't mean to leverage this option, please unset %v",
+			WorkersNumEnvKey, os.Getenv(WorkersNumEnvKey), WorkersNumEnvKey))
 	}
 	return nil
 }
@@ -121,7 +126,11 @@ func (r *Runner) TagDirectory() (*reports.ReportService, error) {
 	var files []string
 	err := filepath.Walk(r.dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			logger.Warning(fmt.Sprintf("Failed to scan dir %s", path))
+			// filepath.Walk passes a nil info alongside the error, so carrying on here
+			// dereferenced nil - a path that cannot be stat'ed (permissions, a path too
+			// long for the platform, a file removed mid-scan) crashed the whole run.
+			logger.Warning(fmt.Sprintf("Failed to scan %s: %s", path, err))
+			return nil
 		}
 		if r.nonRecursive && info.IsDir() && path != r.dir {
 			return filepath.SkipDir
@@ -132,7 +141,9 @@ func (r *Runner) TagDirectory() (*reports.ReportService, error) {
 		return nil
 	})
 	if err != nil {
-		logger.Error("Failed to run Walk() on root dir", r.dir)
+		// Passing exactly two arguments makes the logger treat the second as an error
+		// type and drop the message entirely, so this exited 1 with no output at all.
+		logger.Error(fmt.Sprintf("Failed to run Walk() on root dir %s: %s", r.dir, err))
 	}
 
 	var wg sync.WaitGroup
@@ -165,13 +176,12 @@ func (r *Runner) isSkippedResourceType(resourceType string) bool {
 	return false
 }
 
-func (r *Runner) isSkippedResource(resource string, skipResource []string) bool {
+// isSkippedResource reports whether the resource was named in --skip-resources. Skips
+// coming from #yor:skip comments are carried on the block itself, because they apply to
+// one resource in one file and matching them by id across files silenced identically
+// named resources elsewhere.
+func (r *Runner) isSkippedResource(resource string) bool {
 	for _, skippedResource := range r.skippedResources {
-		if resource == skippedResource {
-			return true
-		}
-	}
-	for _, skippedResource := range skipResource {
 		if resource == skippedResource {
 			return true
 		}
@@ -197,8 +207,11 @@ func (r *Runner) TagFile(file string) {
 			if r.isSkippedResourceType(block.GetResourceType()) {
 				continue
 			}
-			skipResourcesByComment := parser.GetSkipResourcesByComment()
-			if r.isSkippedResource(block.GetResourceID(), skipResourcesByComment) {
+			if block.IsSkippedByComment() {
+				logger.Debug(fmt.Sprintf("Skipping %v:%v due to a yor skip comment", file, block.GetResourceID()))
+				continue
+			}
+			if r.isSkippedResource(block.GetResourceID()) {
 				continue
 			}
 			if block.IsBlockTaggable() {
