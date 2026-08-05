@@ -5,15 +5,12 @@ import (
 	"log"
 	"os"
 	"strings"
-	"sync"
 )
 
 type loggingService struct {
 	logLevel LogLevel
 	stdout   *os.File
 	stderr   *os.File
-	disabled bool
-	muteLock sync.Mutex
 }
 
 type LogLevel int
@@ -65,9 +62,7 @@ func (e *loggingService) log(logLevel LogLevel, args ...string) {
 		strArgs = fmt.Sprintf("[%s] ", strLogLevels[logLevel]) + strArgs
 		switch logLevel {
 		case DEBUG, INFO, WARNING:
-			if !e.disabled {
-				log.Println(strArgs)
-			}
+			log.Println(strArgs)
 		case ERROR:
 			if len(args) == 2 {
 				errorType := args[1]
@@ -116,32 +111,12 @@ func (e *loggingService) SetLogLevel(inputLogLevel string) {
 	e.logLevel = logLevel
 }
 
-func MuteOutputBlock(fn func()) {
-	if Logger.logLevel < WARNING {
-		fn()
-		return
-	}
-
-	Logger.muteLock.Lock()
-	defer Logger.muteLock.Unlock()
-
-	Logger.disabled = true
-	Debug("Mute logging")
-	w, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	stdout := os.Stdout
-	stderr := os.Stderr
-	os.Stdout = w
-	os.Stderr = w
-	log.SetOutput(w)
-	defer func() {
-		_ = w.Close()
-		os.Stdout = stdout
-		os.Stderr = stderr
-		log.SetOutput(os.Stderr)
-		Logger.disabled = false
-	}()
-
-	fn()
-
-	Debug("Unmute logging")
-}
+// MuteOutputBlock used to live here. It reassigned the process-wide os.Stdout and
+// os.Stderr and flipped Logger.disabled for the duration of a callback, all without
+// synchronising against the worker goroutines that log concurrently - a data race that
+// also sent their output to the null device.
+//
+// Its single caller wrapped a module download, which was once "terraform get" shelling
+// out and writing to stdout directly. That was replaced by a go-getter Client with no
+// progress listener, which writes nothing to stdout, so there is no longer any output to
+// suppress: the log level already governs the two logger calls in that block.

@@ -22,46 +22,81 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// skippedResourceIDs returns the ids of the blocks that carry a yor skip comment. The
+// skip is recorded on the block rather than accumulated on the parser, so that a skip in
+// one file cannot silence identically named resources in another.
+func skippedResourceIDs(blocks []structure.IBlock) []string {
+	skipped := make([]string, 0)
+	for _, block := range blocks {
+		if block.IsSkippedByComment() {
+			skipped = append(skipped, block.GetResourceID())
+		}
+	}
+
+	return skipped
+}
+
 func TestTerraformParser_SkipResourceByComment(t *testing.T) {
-	t.Run("SkipAll comment added all resources to skipResourcesByComment slice", func(t *testing.T) {
+	t.Run("SkipAll comment marks every resource in the file as skipped", func(t *testing.T) {
 		// Initialize TerraformParser and parse file with all resources containing skip comment
 		p := &TerraformParser{}
 		p.Init("../../../tests/terraform/skipComment/", nil)
 		defer p.Close()
 		filePath := "../../../tests/terraform/skipComment/skipAll.tf"
-		_, err := p.ParseFile(filePath)
+		blocks, err := p.ParseFile(filePath)
 		if err != nil {
 			t.Errorf("failed to read hcl file because %s", err)
 		}
 		exceptedSkipResources := []string{"aws_vpc.example_vpc", "aws_subnet.example_subnet", "aws_instance.example_instance"}
-		assert.Equal(t, exceptedSkipResources, p.GetSkipResourcesByComment())
+		assert.Equal(t, exceptedSkipResources, skippedResourceIDs(blocks))
 	})
 
-	t.Run("No resources with skip comment in the file, skipResourcesByComment slice should be empty", func(t *testing.T) {
+	t.Run("No resources with skip comment in the file, nothing is marked as skipped", func(t *testing.T) {
 		// Initialize TerraformParser and parse file with no skip tags
 		p := &TerraformParser{}
 		p.Init("../../../tests/terraform/skipComment/", nil)
 		defer p.Close()
 		filePath := "../../../tests/terraform/skipComment/noSkip.tf"
-		_, err := p.ParseFile(filePath)
+		blocks, err := p.ParseFile(filePath)
 		if err != nil {
 			t.Errorf("failed to read hcl file because %s", err)
 		}
-		assert.Empty(t, p.GetSkipResourcesByComment())
+		assert.Empty(t, skippedResourceIDs(blocks))
 	})
 
-	t.Run("One resource with skip comment, only that resource added to skipResourcesByComment slice", func(t *testing.T) {
+	t.Run("One resource with skip comment, only that resource is marked as skipped", func(t *testing.T) {
 		// Initialize TerraformParser and parse file with one resource containing skip tag
 		p := &TerraformParser{}
 		p.Init("../../../tests/terraform/skipComment/", nil)
 		defer p.Close()
 		filePath := "../../../tests/terraform/skipComment/skipOne.tf"
-		_, err := p.ParseFile(filePath)
+		blocks, err := p.ParseFile(filePath)
 		if err != nil {
 			t.Errorf("failed to read hcl file because %s", err)
 		}
 		exceptedSkipResources := []string{"aws_instance.example_instance"}
-		assert.Equal(t, exceptedSkipResources, p.GetSkipResourcesByComment())
+		assert.Equal(t, exceptedSkipResources, skippedResourceIDs(blocks))
+	})
+
+	t.Run("a skip in one file does not affect an identically named resource in another", func(t *testing.T) {
+		dir := t.TempDir()
+		skipped := filepath.Join(dir, "a_skipped.tf")
+		notSkipped := filepath.Join(dir, "b_not_skipped.tf")
+		assert.NoError(t, os.WriteFile(skipped, []byte("#yor:skip\nresource \"aws_s3_bucket\" \"this\" {\n  bucket = \"a\"\n}\n"), 0600))
+		assert.NoError(t, os.WriteFile(notSkipped, []byte("resource \"aws_s3_bucket\" \"this\" {\n  bucket = \"b\"\n}\n"), 0600))
+
+		p := &TerraformParser{}
+		p.Init(dir, nil)
+		defer p.Close()
+
+		skippedBlocks, err := p.ParseFile(skipped)
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"aws_s3_bucket.this"}, skippedResourceIDs(skippedBlocks))
+
+		// Same resource id, different file: it must not inherit the skip.
+		otherBlocks, err := p.ParseFile(notSkipped)
+		assert.NoError(t, err)
+		assert.Empty(t, skippedResourceIDs(otherBlocks))
 	})
 }
 

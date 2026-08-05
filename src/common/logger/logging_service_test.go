@@ -2,7 +2,6 @@ package logger
 
 import (
 	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/bridgecrewio/yor/tests/utils"
@@ -57,28 +56,4 @@ func TestLogger(t *testing.T) {
 		assert.Equal(t, "", logs)
 	})
 
-	t.Run("Test mute and unmute", func(t *testing.T) {
-		Logger.SetLogLevel("WARNING")
-
-		var result string
-		infoMsg := "Test muted INFO"
-		warningMsg := "Test muted WARNING"
-		debugMsg := "Test muted DEBUG"
-		MuteOutputBlock(func() {
-			result = utils.CaptureOutput(func() { Info(infoMsg) })
-			assert.Equal(t, "", result)
-			result = utils.CaptureOutput(func() { Warning(warningMsg) })
-			assert.Equal(t, "", result)
-			result = utils.CaptureOutput(func() { Debug(debugMsg) })
-			assert.Equal(t, "", result)
-		})
-		Logger.SetLogLevel("DEBUG")
-		result = utils.CaptureOutput(func() { Info(infoMsg) })
-		assert.True(t, strings.Contains(result, infoMsg))
-		result = utils.CaptureOutput(func() { Warning(warningMsg) })
-		assert.True(t, strings.Contains(result, warningMsg))
-		result = utils.CaptureOutput(func() { Debug(debugMsg) })
-		assert.True(t, strings.Contains(result, debugMsg))
-		Logger.SetLogLevel("WARNING")
-	})
 }

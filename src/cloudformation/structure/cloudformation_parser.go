@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 
 	goformationTags "github.com/awslabs/goformation/v5/cloudformation/tags"
 	"github.com/bridgecrewio/goformation/v5"
@@ -29,14 +28,11 @@ import (
 type CloudformationParser struct {
 	*types.YamlParser
 	*types.JSONParser
-	skippedByCommentList []string
 }
 
 const TagsAttributeName = "Tags"
 const ResourcesStartToken = "Resources"
 const EnvVarsPath = "Resources/*/Properties/Environment/Variables/*"
-
-var goformationLock sync.Mutex
 
 func (p *CloudformationParser) Name() string {
 	return "CloudFormation"
@@ -115,9 +111,9 @@ func goformationParse(file string) (*cloudformation.Template, error) {
 
 func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, error) {
 	var skipResourcesByComment []string
-	goformationLock.Lock()
+	yaml.GoformationLock.Lock()
 	template, err := goformationParse(filePath)
-	goformationLock.Unlock()
+	yaml.GoformationLock.Unlock()
 	if err != nil || template == nil {
 		logger.Warning(fmt.Sprintf("There was an error processing the cloudformation template %v: %s", filePath, err))
 		if err == nil {
@@ -141,7 +137,6 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 		switch utils.GetFileFormat(filePath) {
 		case common.YmlFileType.FileFormat, common.YamlFileType.FileFormat:
 			resourceNamesToLines, skipResourcesByComment = yaml.MapResourcesLineYAML(filePath, resourceNames, ResourcesStartToken)
-			p.skippedByCommentList = append(p.skippedByCommentList, skipResourcesByComment...)
 		case common.JSONFileType.FileFormat:
 			var fileBracketsMapping map[int]json.BracketPair
 			resourceNamesToLines, fileBracketsMapping = json.MapResourcesLineJSON(filePath, resourceNames)
@@ -189,6 +184,7 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 					TagLines:          tagsLines,
 					Name:              resourceName,
 					Type:              resourceType,
+					SkippedByComment:  utils.InSlice(skipResourcesByComment, resourceName),
 				},
 			}
 			parsedBlocks = append(parsedBlocks, cfnBlock)
@@ -317,7 +313,4 @@ func (p *CloudformationParser) getTagsLines(filePath string, resourceLinesRange 
 	default:
 		return structure.Lines{Start: -1, End: -1}
 	}
-}
-func (p *CloudformationParser) GetSkipResourcesByComment() []string {
-	return p.skippedByCommentList
 }
