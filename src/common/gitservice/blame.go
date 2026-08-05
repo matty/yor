@@ -51,8 +51,19 @@ func GetPreviousBlameResult(gitSvc *GitService, filePath string) (*git.BlameResu
 
 func NewGitBlame(relativeFilePath string, filePath string, lines structure.Lines, blameResult *git.BlameResult, gitSvc *GitService) *GitBlame {
 	gitBlame := GitBlame{GitOrg: gitSvc.organization, GitRepository: gitSvc.repoName, BlamesByLine: map[int]*git.Line{}, FilePath: relativeFilePath, GitUserEmail: gitSvc.currentUserEmail}
+	if blameResult == nil {
+		logger.Warning(fmt.Sprintf("got no git blame for file %s", relativeFilePath))
+		return &gitBlame
+	}
 	startLine := lines.Start - 1 // the lines in blameResult.Lines start from zero while the lines range start from 1
 	endLine := lines.End - 1
+	// Only the upper bound used to be checked. A resource whose lines could not be
+	// mapped carries {-1,-1}, and an unresolved origin->git lookup yields 0; both turn
+	// into a negative index into blameResult.Lines.
+	if startLine < 0 || endLine < startLine {
+		logger.Warning(fmt.Sprintf("cannot get git blame for %s: unresolved line range %d-%d", relativeFilePath, lines.Start, lines.End))
+		return &gitBlame
+	}
 	previousBlameResult, previousCommit := GetPreviousBlameResult(gitSvc, filePath)
 
 	for line := startLine; line <= endLine; line++ {
@@ -60,13 +71,18 @@ func NewGitBlame(relativeFilePath string, filePath string, lines structure.Lines
 			logger.Warning(fmt.Sprintf("Index out of bound on parsed file %s", relativeFilePath))
 			return &gitBlame
 		}
-		gitBlame.BlamesByLine[line+1] = blameResult.Lines[line]
+		blameLine := blameResult.Lines[line]
+		if blameLine == nil {
+			continue
+		}
+		gitBlame.BlamesByLine[line+1] = blameLine
 
 		// Check if the line has been removed in the current state of the file
-		if previousBlameResult != nil && len(previousBlameResult.Lines) > len(blameResult.Lines) {
-			if previousBlameResult.Lines[line].Text != blameResult.Lines[line].Text {
+		if previousBlameResult != nil && len(previousBlameResult.Lines) > len(blameResult.Lines) && previousCommit != nil {
+			previousLine := previousBlameResult.Lines[line]
+			if previousLine != nil && previousLine.Text != blameLine.Text {
 				// The line has been removed, so update the git commit id
-				gitBlame.BlamesByLine[line+1].Hash = previousCommit.Hash
+				blameLine.Hash = previousCommit.Hash
 			}
 		}
 	}
@@ -75,6 +91,11 @@ func NewGitBlame(relativeFilePath string, filePath string, lines structure.Lines
 }
 
 func (g *GitBlame) GetLatestCommit() (latestCommit *git.Line) {
+	if g == nil {
+		// GetBlameForFileLines returns a nil blame alongside its error; callers that only
+		// check one of the two used to fault here instead of reporting the error.
+		return nil
+	}
 	latestDate := time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)
 	for _, v := range g.BlamesByLine {
 		if v == nil {
