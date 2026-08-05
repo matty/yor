@@ -1,0 +1,6 @@
+# Yor's test fixtures are compared byte for byte against the output of the writers,
+# and some are diffed against git blame results, so they have to keep LF endings in
+# the working tree on every platform. With core.autocrlf=true they check out as CRLF
+# on Windows and the json, cloudformation, yaml, serverless and gittag packages all
+# fail for reasons that have nothing to do with the code under test.
+tests/** text eol=lf
