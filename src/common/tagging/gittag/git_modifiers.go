@@ -26,6 +26,11 @@ func (t *GitModifiersTag) CalculateValue(data interface{}) (tags.ITag, error) {
 	foundModifyingUsers := make(map[string]bool)
 	var modifyingUsers []string
 	for _, v := range gitBlame.BlamesByLine {
+		if v == nil {
+			// A line with no blame entry, which GetLatestCommit and the other git tags
+			// already account for.
+			continue
+		}
 		userName := strings.Split(v.Author, "@")[0]
 		if !foundModifyingUsers[userName] && userName != "" && !strings.Contains(userName, "[") {
 			modifyingUsers = append(modifyingUsers, userName)
