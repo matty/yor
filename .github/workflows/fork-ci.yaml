@@ -78,7 +78,14 @@ jobs:
         # -race is what makes the shared-state bugs in the parsers visible: the runner
         # fans out YOR_WORKER_NUM goroutines over one parser instance, and without the
         # detector those races pass green every time.
-        run: go test -race ./src/... -covermode=atomic -coverprofile=coverage.out
+        #
+        # Test_loadExternalTags is skipped here and run on its own below: coverage
+        # instrumentation rebuilds the src packages, so the copy of
+        # src/common/tagging/tags linked into the test binary no longer matches the
+        # one inside the plugin and plugin.Open rejects it.
+        run: go test -race ./src/... -covermode=atomic -coverprofile=coverage.out -skip 'Test_loadExternalTags'
+      - name: Test external plugin loading
+        run: go test -race ./src/common/runner/... -run 'Test_loadExternalTags' -count=1
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
       - name: Upload coverage
@@ -129,7 +136,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Mirrors the target list in .goreleaser.yml.
+        # Mirrors the target list in .goreleaser.yml, minus windows/arm — Go dropped
+        # that port, and 1.26 rejects it outright with "unsupported GOOS/GOARCH pair".
         include:
           - { goos: linux,   goarch: '386' }
           - { goos: linux,   goarch: amd64 }
@@ -139,7 +147,6 @@ jobs:
           - { goos: darwin,  goarch: arm64 }
           - { goos: windows, goarch: '386' }
           - { goos: windows, goarch: amd64 }
-          - { goos: windows, goarch: arm, goarm: '7' }
           - { goos: windows, goarch: arm64 }
     env:
       CGO_ENABLED: '0'
@@ -178,12 +185,21 @@ jobs:
         run: |
           git fetch --tags --force || true
           git describe --tags || git tag v0.0.0-fork-ci
+      - name: Build a fork-local goreleaser config
+        # Derived from .goreleaser.yml rather than duplicated, so it tracks upstream.
+        # Two changes: windows/arm is ignored (Go 1.26 has no such port, so the real
+        # release config is broken there too), and the homebrew tap is dropped since
+        # it targets bridgecrewio and wants a token.
+        run: |
+          yq '.builds[0].ignore += [{"goos": "windows", "goarch": "arm"}] | del(.brews)' \
+            .goreleaser.yml > "${RUNNER_TEMP}/goreleaser-fork-ci.yml"
+          cat "${RUNNER_TEMP}/goreleaser-fork-ci.yml"
       - name: goreleaser (snapshot, no publish)
         uses: goreleaser/goreleaser-action@v5
         with:
           # .goreleaser.yml has no `version: 2` key, which goreleaser v2 rejects.
           version: '~> v1'
-          args: release --snapshot --clean --skip-publish
+          args: release --snapshot --clean --skip-publish --config ${{ runner.temp }}/goreleaser-fork-ci.yml
       - name: Upload snapshot artifacts
         uses: actions/upload-artifact@v4
         with:
