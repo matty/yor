@@ -1,0 +1,195 @@
+# Fork-only CI. Runs the full test and build surface on GitHub-hosted runners so
+# this repo can be validated without the [self-hosted, public, linux, x64] pool
+# that build.yaml and test.yaml's integration job depend on.
+#
+# This file is deliberately NOT part of upstream. Do not include it in any pull
+# request to bridgecrewio/yor — branch fix work off upstream/main rather than off
+# this fork's main, or `git rm .github/workflows/fork-ci.yaml` before opening the PR.
+# The repository guard below means it no-ops if it ever does leak upstream.
+
+name: fork-ci
+
+on:
+  push:
+    branches:
+      - '**'
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'INTHEWILD.md'
+      - '.pre-commit-config.yaml'
+  pull_request:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.26.4'
+
+jobs:
+  lint:
+    if: github.repository == 'matty/yor'
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # Prebuilt golangci-lint releases lag the Go release, and a linter built with
+      # an older Go rejects the module's `go 1.26.0` directive, so build from source
+      # with the matching toolchain.
+      - name: Install golangci-lint (built with Go ${{ env.GO_VERSION }})
+        run: GOTOOLCHAIN=go${{ env.GO_VERSION }} go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - name: golangci-lint
+        run: GOTOOLCHAIN=go${{ env.GO_VERSION }} "$(go env GOPATH)/bin/golangci-lint" run ./...
+
+  unit-tests:
+    if: github.repository == 'matty/yor'
+    name: unit tests (race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Prepare external plugin tests
+        # Built with -race to match the test binary. A plugin and its host must agree
+        # on the build configuration, or the plugin is rejected at load time with
+        # "plugin was built with a different version of package internal/runtime/sys"
+        # and Test_loadExternalTags fails.
+        run: |
+          go build -race -buildmode=plugin -o tests/yor_plugins/example/extra_tags.so tests/yor_plugins/example/*.go
+          go build -race -buildmode=plugin -o tests/yor_plugins/tag_group_example/extra_tag_groups.so tests/yor_plugins/tag_group_example/*.go
+      - name: Build
+        run: go build -v
+      - name: Test
+        # -race is what makes the shared-state bugs in the parsers visible: the runner
+        # fans out YOR_WORKER_NUM goroutines over one parser instance, and without the
+        # detector those races pass green every time.
+        run: go test -race ./src/... -covermode=atomic -coverprofile=coverage.out
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: warn
+
+  integration-tests:
+    if: github.repository == 'matty/yor'
+    name: integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build
+        run: go build
+      - name: Clone Terragoat - vulnerable terraform
+        uses: actions/checkout@v4
+        with:
+          repository: bridgecrewio/terragoat
+          fetch-depth: 0
+          clean: false
+          path: 'terragoat'
+          ref: 063dc2db3bb036160ed39d3705508ee8293a27c8
+      - name: Run yor
+        # The integration tests read ../../result.json and ../../list-tags-result.txt
+        # from the repo root, so these two runs are fixtures, not smoke tests.
+        run: |
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          ./yor list-tags -g code2cloud,git > list-tags-result.txt
+          ./yor tag -d terragoat -o json --output-json-file result.json
+      - name: Run integration tests
+        run: go test -race ./tests/integration/...
+
+  cross-build:
+    if: github.repository == 'matty/yor'
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors the target list in .goreleaser.yml.
+        include:
+          - { goos: linux,   goarch: '386' }
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm, goarm: '7' }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: '386' }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm, goarm: '7' }
+          - { goos: windows, goarch: arm64 }
+    env:
+      CGO_ENABLED: '0'
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      GOARM: ${{ matrix.goarm }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build
+        run: go build -v -o /dev/null
+
+  release-snapshot:
+    if: github.repository == 'matty/yor'
+    name: goreleaser snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - unit-tests
+      - integration-tests
+      - lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Ensure a tag exists for set-version.sh
+        # .goreleaser.yml's before hook runs `git describe --tags`, which fails on a
+        # fork clone with no tags reachable from HEAD.
+        run: |
+          git fetch --tags --force || true
+          git describe --tags || git tag v0.0.0-fork-ci
+      - name: goreleaser (snapshot, no publish)
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          # .goreleaser.yml has no `version: 2` key, which goreleaser v2 rejects.
+          version: '~> v1'
+          args: release --snapshot --clean --skip-publish
+      - name: Upload snapshot artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: yor-snapshot
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+          if-no-files-found: warn
